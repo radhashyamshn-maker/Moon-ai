@@ -13,21 +13,22 @@ permissions:
 env:
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -Dorg.gradle.daemon=false"
 
 jobs:
   build:
     name: 🚀 Build Standalone Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Set up Node.js 22
+      - name: ⚙️ Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: 'npm'
+          node-version: 20
 
       - name: 📦 Install NPM dependencies
         run: |
@@ -39,82 +40,59 @@ jobs:
 
       - name: 🔄 Sync Capacitor Android
         run: |
-          npx --yes @capacitor/cli sync android
+          npx cap sync android || true
           mkdir -p android/app/src/main/assets/public
           cp -r dist/* android/app/src/main/assets/public/ 2>/dev/null || true
-          if [ -f "node_modules/@capacitor/android/capacitor/build.gradle" ]; then
-            sed -i 's/classpath .com\.android\.tools\.build:gradle:[^'\''"]*./classpath '\''com.android.tools.build:gradle:9.1.1'\''/g' node_modules/@capacitor/android/capacitor/build.gradle 2>/dev/null || true
-          fi
-          if [ -f "android/capacitor-cordova-android-plugins/build.gradle" ]; then
-            sed -i 's/classpath .com\.android\.tools\.build:gradle:[^'\''"]*./classpath '\''com.android.tools.build:gradle:9.1.1'\''/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
-            sed -i 's/compileSdkVersion : 36/compileSdkVersion : 35/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
-            sed -i 's/targetSdkVersion : 36/targetSdkVersion : 35/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
-          fi
-          sed -i 's/proguard-android\.txt/proguard-android-optimize.txt/g' android/app/build.gradle 2>/dev/null || true
-          sed -i '/apply plugin: .org\.jetbrains\.kotlin\.android./d' android/app/build.gradle 2>/dev/null || true
-          sed -i 's/android\.builtInKotlin=false/android.builtInKotlin=true/g' android/gradle.properties 2>/dev/null || true
 
-      - name: ☕ Set up Temurin Java 21
+      - name: ☕ Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '17'
 
-      - name: 📱 Set up Android SDK
-        uses: android-actions/setup-android@v3
-        continue-on-error: true
-        with:
-          packages: 'platforms;android-35 build-tools;35.0.0 platform-tools'
-
-      - name: 📱 Accept Android SDK Licenses
+      - name: 📱 Configure Android SDK & Accept Licenses
         run: |
-          if [ -z "$ANDROID_HOME" ]; then
-            export ANDROID_HOME="/usr/local/lib/android/sdk"
-          fi
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           mkdir -p "$ANDROID_HOME/licenses" 2>/dev/null || true
           echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license" || true
           echo -e "84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license" || true
-          yes | sdkmanager --licenses 2>/dev/null || true
-
-      - name: 🔑 Create temporary debug keystore
-        run: |
-          mkdir -p ~/.android
-          if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkey -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA -keysize 2048 -validity 10000
-          fi
-          if [ ! -f ./debug.keystore ]; then
-            cp ~/.android/debug.keystore ./debug.keystore 2>/dev/null || true
-          fi
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          # Ensure platform 34 and build-tools 34 are installed
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
 
       - name: 🐘 Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
 
-      - name: 🧹 Stop stale Gradle daemons and clean locks
+      - name: 🔑 Ensure Gradle Wrapper & Permissions
         run: |
           chmod +x ./gradlew ./android/gradlew 2>/dev/null || true
-          ./android/gradlew --stop 2>/dev/null || true
-          pkill -f '.*gradle.*' 2>/dev/null || true
-          find ~/.gradle/caches -name "*.lock" -delete 2>/dev/null || true
-          find . -name "*.lock" -delete 2>/dev/null || true
+          if [ ! -f "android/gradle/wrapper/gradle-wrapper.jar" ]; then
+            mkdir -p android/gradle/wrapper
+            curl -sLo android/gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar || true
+          fi
 
       - name: 🔨 Build debug APK
         run: |
           cd android
           chmod +x ./gradlew
-          ./gradlew assembleDebug --stacktrace --no-daemon --no-scan
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: 🔍 Verify and Collect APK
         run: |
           mkdir -p app/build/outputs/apk/debug
-          APK_FILE=$(find . -type f -name "*debug*.apk" 2>/dev/null | head -n 1)
+          APK_FILE=$(find android/app/build/outputs/apk/debug -name "*.apk" -type f 2>/dev/null | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            APK_FILE=$(find . -name "*debug*.apk" -type f 2>/dev/null | head -n 1)
+          fi
           if [ -n "$APK_FILE" ]; then
+            echo "Found APK at: $APK_FILE"
             cp -f "$APK_FILE" "app/build/outputs/apk/debug/app-debug.apk"
+            echo "### ✅ Android APK Built Successfully! 🎉" >> $GITHUB_STEP_SUMMARY
+            echo "- **Generated APK:** \`app-debug.apk\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Source:** \`${APK_FILE}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Download:** Check the Artifacts section below." >> $GITHUB_STEP_SUMMARY
           else
             echo "::error::No debug APK found!" >&2
             exit 1
