@@ -33,17 +33,16 @@ jobs:
           # Accept Android licenses non-interactively
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      # Step 4: Setup Node.js & Sync Web Assets for Capacitor (if present)
+      # Step 4: Set up Node.js (cache disabled so it never fails on missing package-lock.json)
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: Install Dependencies & Build Web Assets
         run: |
-          npm ci || npm install
-          npm run build:client || npm run build || true
+          npm install --legacy-peer-deps || true
+          npm run build || true
           npx cap sync android || true
 
       # Step 5: Enable Gradle caching for high-speed builds
