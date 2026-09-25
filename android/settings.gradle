@@ -1,0 +1,7 @@
+include ':app'
+rootProject.name = 'Moon AI'
+
+include ':capacitor-android'
+project(':capacitor-android').projectDir = new File('../node_modules/@capacitor/android/capacitor')
+
+apply from: 'capacitor.settings.gradle'

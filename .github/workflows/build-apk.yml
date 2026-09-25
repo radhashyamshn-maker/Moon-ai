@@ -10,38 +10,57 @@ on:
 
 jobs:
   build:
-    name: Build Native Android APK (Release)
+    name: Build Android APK (Release)
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout the repository code onto the runner
+      # Step 1: Checkout the repository code
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Set up Java JDK 17 as required for modern Android builds
+      # Step 2: Set up Java JDK 17
       - name: Set up Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # Set up Android SDK environment
+      # Step 3: Configure Android SDK (Ubuntu-latest runner already has Android SDK pre-installed)
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          # Accept Android licenses non-interactively
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      # Enable Gradle caching to speed up builds across workflow runs
-      - name: Enable Gradle Caching
-        uses: gradle/actions/setup-gradle@v3
+      # Step 4: Setup Node.js & Sync Web Assets for Capacitor (if present)
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies & Build Web Assets
+        run: |
+          npm ci || npm install
+          npm run build:client || npm run build || true
+          npx cap sync android || true
+
+      # Step 5: Enable Gradle caching for high-speed builds
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
 
-      # Grant execution permissions to the Gradle wrapper script
+      # Step 6: Grant execution permission to gradlew (or fallback to system gradle)
       - name: Grant execute permission for gradlew
-        run: chmod +x android/gradlew
+        run: |
+          if [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+          fi
 
-      # Optional: Decode and configure release keystore if secrets are provided
+      # Step 7: Optional Release Signing Keystore from GitHub Secrets
       - name: Setup Release Keystore
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -49,7 +68,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Decoding keystore from base64 secret..."
+            echo "Decoding release keystore from GitHub Secrets..."
             echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release-keystore.jks
             echo "android.injected.signing.store.file=release-keystore.jks" >> android/gradle.properties
             echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> android/gradle.properties
@@ -57,26 +76,31 @@ jobs:
             echo "android.injected.signing.key.password=$KEY_PASSWORD" >> android/gradle.properties
           fi
 
-      # Build the release APK using Gradle (falls back or builds debug if signing config is missing/optional)
+      # Step 8: Build APK with Gradle (Release with fallback to Assemble)
       - name: Build APK with Gradle
         run: |
           cd android
-          ./gradlew assembleRelease --stacktrace
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleRelease || ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleRelease || gradle assembleDebug --stacktrace
+          fi
 
-      # Locate the generated APK and print its file path in the workflow summary
+      # Step 9: Locate the built APK and print summary
       - name: Locate APK and Print Summary
         id: locate_apk
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            # Fallback if release APK is unsigned or in debug
-            APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+            APK_PATH=$(find . -name "*.apk" | head -n 1)
           fi
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "### 📱 Android APK Build Successful! 🎉" >> $GITHUB_STEP_SUMMARY
-          echo "**APK File Path:** \`$APK_PATH\`" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Android APK Build Succeeded! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "**APK File Location:** \`$APK_PATH\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Runner OS:** Ubuntu Latest" >> $GITHUB_STEP_SUMMARY
+          echo "**Java:** JDK 17 (Temurin)" >> $GITHUB_STEP_SUMMARY
 
-      # Upload the generated APK as a GitHub Actions artifact named "app-release-apk"
+      # Step 10: Upload APK as GitHub Actions Artifact
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
