@@ -1,109 +1,120 @@
-name: Build Android APK
+name: Build Android Release APK
 
+# Triggers for building the release APK
 on:
   push:
     branches:
       - main
+      - master
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+# Concurrency group to automatically cancel obsolete redundant runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Android APK (Release)
+    name: Build Release APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Job-level environment variables for maximum Gradle performance & memory
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
+      JAVA_TOOL_OPTIONS: "-Xmx4g"
 
     steps:
-      # Step 1: Checkout the repository code
-      - name: Checkout Repository
+      # Step 1: Check out the repository source code
+      - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      # Step 2: Set up Java JDK 17
-      - name: Set up Java JDK 17
+      # Step 2: Set up Java Zulu JDK 17 with Gradle caching
+      - name: Set up Java JDK 17 (Zulu)
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
+          cache: 'gradle'
 
-      # Step 3: Configure Android SDK (Ubuntu-latest runner already has Android SDK pre-installed)
+      # Step 3a: Set up Flutter environment (executed only if pubspec.yaml exists)
+      - name: Set up Flutter SDK
+        if: hashFiles('pubspec.yaml') != ''
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # Step 3b: Verify Flutter version and fetch project dependencies
+      - name: Install Flutter Dependencies
+        if: hashFiles('pubspec.yaml') != ''
+        run: |
+          flutter --version
+          flutter pub get
+
+      # Step 3c: Build Flutter Release APK (with auto-fallback to clean rebuild if required)
+      - name: Build Flutter Release APK
+        if: hashFiles('pubspec.yaml') != ''
+        run: |
+          flutter build apk --release || (flutter clean && flutter pub get && flutter build apk --release)
+
+      # Step 4a: Set up Android SDK command-line tools (executed for Native Android projects)
       - name: Set up Android SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          # Accept Android licenses non-interactively
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+        if: hashFiles('pubspec.yaml') == ''
+        uses: android-actions/setup-android@v3
 
-      # Step 4: Set up Node.js (cache disabled so it never fails on missing package-lock.json)
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Dependencies & Build Web Assets
-        run: |
-          npm install --legacy-peer-deps || true
-          npm run build || true
-          npx cap sync android || true
-
-      # Step 5: Enable Gradle caching for high-speed builds
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: false
-
-      # Step 6: Grant execution permission to gradlew (or fallback to system gradle)
-      - name: Grant execute permission for gradlew
-        run: |
-          if [ -f "android/gradlew" ]; then
-            chmod +x android/gradlew
-          fi
-
-      # Step 7: Optional Release Signing Keystore from GitHub Secrets
-      - name: Setup Release Keystore
+      # Step 4b: Inject Release Keystore from GitHub Secrets (only if secret provided)
+      - name: Configure Android Signing Keystore
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Decoding release keystore from GitHub Secrets..."
-            echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release-keystore.jks
-            echo "android.injected.signing.store.file=release-keystore.jks" >> android/gradle.properties
-            echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> android/gradle.properties
-            echo "android.injected.signing.key.alias=$KEY_ALIAS" >> android/gradle.properties
-            echo "android.injected.signing.key.password=$KEY_PASSWORD" >> android/gradle.properties
-          fi
+          TARGET_DIR="."
+          if [ -d "android/app" ]; then TARGET_DIR="android"; fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$TARGET_DIR/app/release-keystore.jks"
+          echo "android.injected.signing.store.file=release-keystore.jks" >> "$TARGET_DIR/gradle.properties"
+          echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> "$TARGET_DIR/gradle.properties"
+          echo "android.injected.signing.key.alias=$KEY_ALIAS" >> "$TARGET_DIR/gradle.properties"
+          echo "android.injected.signing.key.password=$KEY_PASSWORD" >> "$TARGET_DIR/gradle.properties"
 
-      # Step 8: Build APK with Gradle (Release with fallback to Assemble)
-      - name: Build APK with Gradle
+      # Step 4c: Clean and build Native Android Release APK using Gradle wrapper
+      - name: Build Native Android Release APK
+        if: hashFiles('pubspec.yaml') == ''
         run: |
-          cd android
           if [ -f "./gradlew" ]; then
-            ./gradlew assembleRelease || ./gradlew assembleDebug --stacktrace
-          else
-            gradle assembleRelease || gradle assembleDebug --stacktrace
+            chmod +x ./gradlew
+            ./gradlew clean
+            ./gradlew assembleRelease --no-daemon --stacktrace || ./gradlew assembleDebug --no-daemon --stacktrace
+          elif [ -f "android/gradlew" ]; then
+            cd android
+            chmod +x ./gradlew
+            ./gradlew clean
+            ./gradlew assembleRelease --no-daemon --stacktrace || ./gradlew assembleDebug --no-daemon --stacktrace
+            cd ..
           fi
 
-      # Step 9: Locate the built APK and print summary
-      - name: Locate APK and Print Summary
-        id: locate_apk
+      # Step 5: Publish build status summary to GitHub Step Summary
+      - name: Output GitHub Step Summary
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find . -name "*.apk" | head -n 1)
-          fi
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          echo "### 📱 Android APK Build Succeeded! 🎉" >> $GITHUB_STEP_SUMMARY
-          echo "**APK File Location:** \`$APK_PATH\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Runner OS:** Ubuntu Latest" >> $GITHUB_STEP_SUMMARY
-          echo "**Java:** JDK 17 (Temurin)" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ APK Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "Download from Actions artifacts." >> $GITHUB_STEP_SUMMARY
 
-      # Step 10: Upload APK as GitHub Actions Artifact
-      - name: Upload APK Artifact
+      # Step 6: Upload the generated release APK as a GitHub Actions artifact
+      - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            app/build/outputs/apk/release/app-release.apk
             android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
           retention-days: 30
