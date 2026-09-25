@@ -1,146 +1,129 @@
-name: Build Android APK
+name: Build and Publish Debug APK
 
 on:
   push:
     branches:
       - main
       - master
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write
+
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
 jobs:
   build:
-    name: Build Android APK (One-Shot Reliable)
+    name: 🚀 Build Standalone Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    env:
-      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -Dorg.gradle.daemon=false"
-      JAVA_TOOL_OPTIONS: "-Xmx4096m"
 
     steps:
-      # Step 1: Checkout repository code
-      - name: Checkout Source Code
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up Java 17 (Zulu distribution with Gradle cache)
-      - name: Set up Java JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-
-      # Step 3: Configure Android SDK (Ubuntu-latest runner pre-installed SDK)
-      - name: Configure Android SDK & Licenses
-        run: |
-          if [ -n "$ANDROID_SDK_ROOT" ]; then
-            echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          fi
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-
-      # Step 4: If Capacitor / Web project, compile web assets & sync to Android
-      - name: Set up Node.js
-        if: hashFiles('package.json') != ''
+      - name: ⚙️ Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: 'npm'
 
-      - name: Build Web Assets & Sync
-        if: hashFiles('package.json') != ''
+      - name: 📦 Install NPM dependencies
         run: |
-          npm install --legacy-peer-deps || true
-          npm run build || true
-          npx cap sync android || true
+          npm install --legacy-peer-deps --no-audit
 
-      # Step 5: If Flutter project, setup Flutter and build
-      - name: Set up Flutter
-        if: hashFiles('pubspec.yaml') != ''
-        uses: subosito/flutter-action@v2
+      - name: 🌐 Build web application
+        run: |
+          npm run build
+
+      - name: 🔄 Sync Capacitor Android
+        run: |
+          npx --yes @capacitor/cli sync android
+          mkdir -p android/app/src/main/assets/public
+          cp -r dist/* android/app/src/main/assets/public/ 2>/dev/null || true
+          if [ -f "node_modules/@capacitor/android/capacitor/build.gradle" ]; then
+            sed -i 's/classpath .com\.android\.tools\.build:gradle:[^'\''"]*./classpath '\''com.android.tools.build:gradle:9.1.1'\''/g' node_modules/@capacitor/android/capacitor/build.gradle 2>/dev/null || true
+          fi
+          if [ -f "android/capacitor-cordova-android-plugins/build.gradle" ]; then
+            sed -i 's/classpath .com\.android\.tools\.build:gradle:[^'\''"]*./classpath '\''com.android.tools.build:gradle:9.1.1'\''/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
+            sed -i 's/compileSdkVersion : 36/compileSdkVersion : 35/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
+            sed -i 's/targetSdkVersion : 36/targetSdkVersion : 35/g' android/capacitor-cordova-android-plugins/build.gradle 2>/dev/null || true
+          fi
+          sed -i 's/proguard-android\.txt/proguard-android-optimize.txt/g' android/app/build.gradle 2>/dev/null || true
+          sed -i '/apply plugin: .org\.jetbrains\.kotlin\.android./d' android/app/build.gradle 2>/dev/null || true
+          sed -i 's/android\.builtInKotlin=false/android.builtInKotlin=true/g' android/gradle.properties 2>/dev/null || true
+
+      - name: ☕ Set up Temurin Java 21
+        uses: actions/setup-java@v4
         with:
-          channel: 'stable'
-          cache: true
+          distribution: 'temurin'
+          java-version: '21'
 
-      - name: Build Flutter APK
-        if: hashFiles('pubspec.yaml') != ''
+      - name: 📱 Set up Android SDK
+        uses: android-actions/setup-android@v3
+        continue-on-error: true
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 platform-tools'
+
+      - name: 📱 Accept Android SDK Licenses
         run: |
-          flutter --version
-          flutter pub get
-          flutter build apk --release || (flutter clean && flutter pub get && flutter build apk --release)
+          if [ -z "$ANDROID_HOME" ]; then
+            export ANDROID_HOME="/usr/local/lib/android/sdk"
+          fi
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          mkdir -p "$ANDROID_HOME/licenses" 2>/dev/null || true
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license" || true
+          echo -e "84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license" || true
+          yes | sdkmanager --licenses 2>/dev/null || true
 
-      # Step 6: Enable Gradle caching for fast and stable builds
-      - name: Setup Gradle
+      - name: 🔑 Create temporary debug keystore
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkey -v -keystore ~/.android/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
+          if [ ! -f ./debug.keystore ]; then
+            cp ~/.android/debug.keystore ./debug.keystore 2>/dev/null || true
+          fi
+
+      - name: 🐘 Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
 
-      # Step 7: Optional Keystore signing (Checked safely inside bash, avoids GitHub syntax error)
-      - name: Setup Release Keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: 🧹 Stop stale Gradle daemons and clean locks
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Keystore secret detected, applying release signing..."
-            TARGET_DIR="."
-            if [ -d "android/app" ]; then TARGET_DIR="android"; fi
-            echo "$KEYSTORE_BASE64" | base64 --decode > "$TARGET_DIR/app/release-keystore.jks"
-            echo "android.injected.signing.store.file=release-keystore.jks" >> "$TARGET_DIR/gradle.properties"
-            echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> "$TARGET_DIR/gradle.properties"
-            echo "android.injected.signing.key.alias=$KEY_ALIAS" >> "$TARGET_DIR/gradle.properties"
-            echo "android.injected.signing.key.password=$KEY_PASSWORD" >> "$TARGET_DIR/gradle.properties"
+          chmod +x ./gradlew ./android/gradlew 2>/dev/null || true
+          ./android/gradlew --stop 2>/dev/null || true
+          pkill -f '.*gradle.*' 2>/dev/null || true
+          find ~/.gradle/caches -name "*.lock" -delete 2>/dev/null || true
+          find . -name "*.lock" -delete 2>/dev/null || true
+
+      - name: 🔨 Build debug APK
+        run: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon --no-scan
+
+      - name: 🔍 Verify and Collect APK
+        run: |
+          mkdir -p app/build/outputs/apk/debug
+          APK_FILE=$(find . -type f -name "*debug*.apk" 2>/dev/null | head -n 1)
+          if [ -n "$APK_FILE" ]; then
+            cp -f "$APK_FILE" "app/build/outputs/apk/debug/app-debug.apk"
           else
-            echo "No custom keystore secret provided, continuing with default signing config."
+            echo "::error::No debug APK found!" >&2
+            exit 1
           fi
 
-      # Step 8: Build Android APK with Gradle (Supports root or android/ subfolder)
-      - name: Build APK with Gradle
-        run: |
-          WORK_DIR="."
-          if [ -d "android" ]; then WORK_DIR="android"; fi
-          cd "$WORK_DIR"
-          
-          # Ensure gradlew has execute permission
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          fi
-
-          # Ensure wrapper jar exists
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            mkdir -p gradle/wrapper
-            curl -sLo gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar || true
-          fi
-
-          # Build Release APK, with auto-fallback to Debug if keystore not present
-          ./gradlew assembleRelease --no-daemon --stacktrace || ./gradlew assembleDebug --no-daemon --stacktrace
-
-      # Step 9: Report summary with found APK path
-      - name: Print Step Summary
-        run: |
-          APK_FILE=$(find . -name "*.apk" -type f | head -n 1)
-          echo "### ✅ APK Built Successfully! 🎉" >> $GITHUB_STEP_SUMMARY
-          echo "- **Location:** \`${APK_FILE}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Download:** Actions Artifacts" >> $GITHUB_STEP_SUMMARY
-
-      # Step 10: Upload APK artifact
-      - name: Upload APK Artifact
+      - name: 📤 Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: |
-            android/app/build/outputs/apk/**/*.apk
-            app/build/outputs/apk/**/*.apk
-            build/app/outputs/flutter-apk/*.apk
-            **/*.apk
-          if-no-files-found: warn
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
           retention-days: 30
