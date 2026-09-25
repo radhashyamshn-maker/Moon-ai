@@ -1,0 +1,14 @@
+{
+	"appId": "com.moonai.companion",
+	"appName": "Moon AI",
+	"webDir": "dist",
+	"bundledWebRuntime": false,
+	"android": {
+		"allowMixedContent": true,
+		"captureInput": true,
+		"webContentsDebuggingEnabled": true
+	},
+	"server": {
+		"cleartext": true
+	}
+}

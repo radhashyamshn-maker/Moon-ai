@@ -1,0 +1,14 @@
+{
+  "appId": "com.moonai.voicecompanion",
+  "appName": "Moon AI - Voice Companion",
+  "webDir": "dist/client",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "server": {
+    "cleartext": true
+  }
+}

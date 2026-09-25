@@ -1,0 +1,12 @@
+{
+  "name": "Jarvis ",
+  "description": "Voice-First Mobile AI Execution System and Quantum HUD Dashboard with real-time audio visualization, biometric authentication, and multi-service telemetry.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

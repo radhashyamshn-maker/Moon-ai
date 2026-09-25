@@ -1,0 +1,86 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Native Android APK (Release)
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository code onto the runner
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Set up Java JDK 17 as required for modern Android builds
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Set up Android SDK environment
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Enable Gradle caching to speed up builds across workflow runs
+      - name: Enable Gradle Caching
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-read-only: false
+
+      # Grant execution permissions to the Gradle wrapper script
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/gradlew
+
+      # Optional: Decode and configure release keystore if secrets are provided
+      - name: Setup Release Keystore
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Decoding keystore from base64 secret..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release-keystore.jks
+            echo "android.injected.signing.store.file=release-keystore.jks" >> android/gradle.properties
+            echo "android.injected.signing.store.password=$KEYSTORE_PASSWORD" >> android/gradle.properties
+            echo "android.injected.signing.key.alias=$KEY_ALIAS" >> android/gradle.properties
+            echo "android.injected.signing.key.password=$KEY_PASSWORD" >> android/gradle.properties
+          fi
+
+      # Build the release APK using Gradle (falls back or builds debug if signing config is missing/optional)
+      - name: Build APK with Gradle
+        run: |
+          cd android
+          ./gradlew assembleRelease --stacktrace
+
+      # Locate the generated APK and print its file path in the workflow summary
+      - name: Locate APK and Print Summary
+        id: locate_apk
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            # Fallback if release APK is unsigned or in debug
+            APK_PATH=$(find android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          fi
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "### 📱 Android APK Build Successful! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "**APK File Path:** \`$APK_PATH\`" >> $GITHUB_STEP_SUMMARY
+
+      # Upload the generated APK as a GitHub Actions artifact named "app-release-apk"
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: |
+            android/app/build/outputs/apk/**/*.apk
+          retention-days: 30
